@@ -1,0 +1,45 @@
+name: amazon-sale-notifier
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"     # every 5 minutes
+  workflow_dispatch:           # lets you run it manually to test
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      # Restore the "orders we've already alerted on" file from the last run.
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: seen_orders.json
+          key: seen-orders-${{ github.run_id }}
+          restore-keys: |
+            seen-orders-
+
+      - name: Check for new orders and notify
+        env:
+          LWA_CLIENT_ID:     ${{ secrets.LWA_CLIENT_ID }}
+          LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
+          LWA_REFRESH_TOKEN: ${{ secrets.LWA_REFRESH_TOKEN }}
+          NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
+          MARKETPLACE_ID:    ATVPDKIKX0DER
+          SPAPI_ENDPOINT:    https://sellingpartnerapi-na.amazon.com
+        run: python notifier.py
+
+      # Save the updated state for the next run.
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: seen_orders.json
+          key: seen-orders-${{ github.run_id }}

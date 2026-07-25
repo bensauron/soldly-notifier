@@ -42,10 +42,32 @@ STATE_FILE = "seen_orders.json"
 LWA_TOKEN_URL = "https://api.amazon.com/auth/o2/token"
 
 
+# --- HTTP with retries ------------------------------------------------------
+def request_with_retries(method, url, *, attempts=4, **kwargs):
+    """Wrap requests.* so a transient network blip (timeout, dropped
+    connection, or 5xx) doesn't fail the whole run. Amazon's auth host
+    occasionally times out; a couple of retries with backoff clears it."""
+    last_err = None
+    for i in range(attempts):
+        try:
+            resp = requests.request(method, url, **kwargs)
+            if resp.status_code >= 500:    # server-side hiccup — retry
+                last_err = f"HTTP {resp.status_code}"
+                raise requests.exceptions.RequestException(last_err)
+            return resp
+        except requests.exceptions.RequestException as e:
+            last_err = e
+            if i < attempts - 1:
+                time.sleep(2 ** i)         # 1s, 2s, 4s
+    raise requests.exceptions.RequestException(
+        f"{method} {url} failed after {attempts} attempts: {last_err}")
+
+
 # --- LWA auth ---------------------------------------------------------------
 def get_access_token():
     """Exchange the long-lived refresh token for a 1-hour access token."""
-    resp = requests.post(
+    resp = request_with_retries(
+        "POST",
         LWA_TOKEN_URL,
         data={
             "grant_type": "refresh_token",
@@ -73,7 +95,7 @@ def get_recent_orders(token):
 
     orders = []
     while True:
-        resp = requests.get(url, headers=headers, params=params, timeout=30)
+        resp = request_with_retries("GET", url, headers=headers, params=params, timeout=30)
         if resp.status_code == 429:        # rate limited — back off and retry
             time.sleep(2)
             continue
@@ -119,7 +141,8 @@ def notify(order):
         parts.append(f"{items} item(s)")
     body = "  |  ".join(parts)
 
-    requests.post(
+    request_with_retries(
+        "POST",
         f"{NTFY_SERVER}/{NTFY_TOPIC}",
         data=body.encode("utf-8"),
         headers={

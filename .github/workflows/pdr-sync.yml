@@ -1,0 +1,40 @@
+name: project-dorm-room-sync
+
+# Updates the room tracker on shopbedly.com/pages/project-dorm-room with
+# net sales since the partnership started (Amazon + shopbedly.com).
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"    # every 6 hours
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print totals only, don't write to Shopify"
+        type: boolean
+        default: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      - name: Sync net sales to Shopify
+        env:
+          LWA_CLIENT_ID:         ${{ secrets.LWA_CLIENT_ID }}
+          LWA_CLIENT_SECRET:     ${{ secrets.LWA_CLIENT_SECRET }}
+          LWA_REFRESH_TOKEN:     ${{ secrets.LWA_REFRESH_TOKEN }}
+          SPAPI_ENDPOINT:        https://sellingpartnerapi-na.amazon.com
+          SHOPIFY_SHOP:          bedly-comfort-products.myshopify.com
+          SHOPIFY_ADMIN_TOKEN:   ${{ secrets.SHOPIFY_ADMIN_TOKEN }}
+          SHOPIFY_CLIENT_ID:     ${{ secrets.SHOPIFY_CLIENT_ID }}
+          SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
+          PDR_START_DATE:        "2026-11-04T00:00:00-05:00"
+          DRY_RUN:               ${{ inputs.dry_run && '1' || '0' }}
+        run: python pdr_sync.py

@@ -101,6 +101,60 @@ def item_net(items, charges_key, promos_key):
     return total
 
 
+class FinancesForbidden(Exception):
+    """The Soldly SP-API app doesn't have the Finance and Accounting role."""
+
+
+MARKETPLACE_ID = os.environ.get("MARKETPLACE_ID", "ATVPDKIKX0DER")   # US
+
+
+def amazon_net_sales_from_orders(token):
+    """Fallback when the Finances API is not allowed: uses the Orders API,
+    which Soldly already has. Net = item price - promotions, tax and shipping
+    excluded. Cancelled orders are skipped and pending orders are counted once
+    Amazon prices them. Refunds on shipped orders are NOT subtracted here;
+    the Finances API path handles those once the role is granted."""
+    headers = {"x-amz-access-token": token}
+    url = f"{SPAPI_ENDPOINT}/orders/v0/orders"
+    params = {"MarketplaceIds": MARKETPLACE_ID,
+              "CreatedAfter": START_DATE.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    orders = []
+    while True:
+        resp = request_with_retries("GET", url, headers=headers, params=params, timeout=60)
+        resp.raise_for_status()
+        payload = resp.json().get("payload", {})
+        orders.extend(payload.get("Orders", []))
+        next_token = payload.get("NextToken")
+        if not next_token:
+            break
+        params = {"MarketplaceIds": MARKETPLACE_ID, "NextToken": next_token}
+        time.sleep(1)
+
+    total = Decimal("0")
+    counted = 0
+    for o in orders:
+        if o.get("OrderStatus") in ("Canceled", "Pending", "PendingAvailability"):
+            continue
+        oid = o["AmazonOrderId"]
+        items_url = f"{SPAPI_ENDPOINT}/orders/v0/orders/{oid}/orderItems"
+        iparams = {}
+        while True:
+            resp = request_with_retries("GET", items_url, headers=headers, params=iparams, timeout=60)
+            resp.raise_for_status()
+            payload = resp.json().get("payload", {})
+            for it in payload.get("OrderItems", []):
+                total += money(it.get("ItemPrice")) - money(it.get("PromotionDiscount"))
+            nt = payload.get("NextToken")
+            if not nt:
+                break
+            iparams = {"NextToken": nt}
+            time.sleep(2.1)
+        counted += 1
+        time.sleep(2.1)   # getOrderItems allows about one request every 2 seconds
+    print(f"  (Orders API fallback: {counted} orders counted, {len(orders) - counted} skipped)")
+    return total
+
+
 def amazon_net_sales(token):
     url = f"{SPAPI_ENDPOINT}/finances/v0/financialEvents"
     headers = {"x-amz-access-token": token}
@@ -113,10 +167,7 @@ def amazon_net_sales(token):
     while True:
         resp = request_with_retries("GET", url, headers=headers, params=params, timeout=60)
         if resp.status_code == 403:
-            raise RuntimeError(
-                "Amazon returned 403 for the Finances API. In Seller Central -> "
-                "Develop Apps, give the Soldly app the 'Finance and Accounting' role, "
-                "then re-authorize to get a new refresh token.")
+            raise FinancesForbidden()
         resp.raise_for_status()
         payload = resp.json().get("payload", {})
         events = payload.get("FinancialEvents", {})
@@ -206,7 +257,13 @@ def write_total(token, total):
 
 # --- Main -------------------------------------------------------------------
 def main():
-    amz_sales, amz_refunds = amazon_net_sales(amazon_token())
+    amz_token = amazon_token()
+    try:
+        amz_sales, amz_refunds = amazon_net_sales(amz_token)
+    except FinancesForbidden:
+        print("Finances API not allowed for this app yet (needs the 'Finance and Accounting' "
+              "role). Using the Orders API instead; refunds are not subtracted.")
+        amz_sales, amz_refunds = amazon_net_sales_from_orders(amz_token), Decimal("0")
     amz_net = amz_sales + amz_refunds
     shop_token = shopify_token()
     site_net = shopify_net_sales(shop_token)
